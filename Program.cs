@@ -120,7 +120,7 @@ public sealed class AppOptions
     /// <summary>要讀取的事件記錄檔。System 一般使用者即可讀取,Security 需要系統管理員。</summary>
     public string EventLogName { get; set; } = "System";
 
-    [JsonConverter(typeof(JsonStringEnumConverter))]
+    [JsonConverter(typeof(JsonStringEnumConverter<StartStrategy>))]
     public StartStrategy Strategy { get; set; } = StartStrategy.FirstEventOfDay;
 
     // ---- 圖示外觀 ----
@@ -134,11 +134,29 @@ public sealed class AppOptions
     public bool ShowMinuteSuffix { get; set; } = false;
 
     /// <summary>動畫模式。Endgame(預設)只在最後警戒階段動起來,平時完全靜止。</summary>
-    [JsonConverter(typeof(JsonStringEnumConverter))]
+    [JsonConverter(typeof(JsonStringEnumConverter<AnimationMode>))]
     public AnimationMode Animation { get; set; } = AnimationMode.Endgame;
 
     /// <summary>使用電池時是否仍播放動畫。預設關閉——每秒喚醒 CPU 八小時對續航是實打實的成本。</summary>
     public bool AnimateOnBattery { get; set; } = false;
+
+    // ---- 圓環配色 ----
+    // 都吃 #RRGGBB 或 #AARRGGBB,留空或打錯字一律安靜退回預設。
+
+    /// <summary>已完成的藍弧。</summary>
+    public string ColorDone { get; set; } = "#4C9AFF";
+
+    /// <summary>還沒完成、以及超時被染回的紅弧。</summary>
+    public string ColorPending { get; set; } = "#E5484D";
+
+    /// <summary>圖示上的文字與秒針點。</summary>
+    public string ColorText { get; set; } = "#FFFFFF";
+
+    /// <summary>平時的中性底色。</summary>
+    public string ColorFill { get; set; } = "#222B33";
+
+    /// <summary>警戒／超時的底色。</summary>
+    public string ColorFillImminent { get; set; } = "#7A1B17";
 
     [JsonIgnore] public TimeSpan WorkDuration => TimeSpan.FromHours(WorkHours);
     [JsonIgnore] public TimeSpan LunchStartTime => ParseTime(LunchStart, new TimeSpan(12, 0, 0));
@@ -146,8 +164,21 @@ public sealed class AppOptions
     [JsonIgnore] public TimeSpan EarliestStartTime => ParseTime(EarliestStart, new TimeSpan(7, 0, 0));
     [JsonIgnore] public TimeSpan WarnThreshold => TimeSpan.FromMinutes(Math.Max(1, WarnMinutes));
 
+    [JsonIgnore] public Color DoneColor => ParseColor(ColorDone, Color.FromArgb(0x4C, 0x9A, 0xFF));
+    [JsonIgnore] public Color PendingColor => ParseColor(ColorPending, Color.FromArgb(0xE5, 0x48, 0x4D));
+    [JsonIgnore] public Color TextColor => ParseColor(ColorText, Color.White);
+    [JsonIgnore] public Color FillColor => ParseColor(ColorFill, Color.FromArgb(0x22, 0x2B, 0x33));
+    [JsonIgnore] public Color FillImminentColor => ParseColor(ColorFillImminent, Color.FromArgb(0x7A, 0x1B, 0x17));
+
     private static TimeSpan ParseTime(string value, TimeSpan fallback)
         => TimeSpan.TryParse(value, out var t) ? t : fallback;
+
+    private static Color ParseColor(string value, Color fallback)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return fallback;
+        try { return ColorTranslator.FromHtml(value.Trim()); }
+        catch { return fallback; }
+    }
 
     /// <summary>讀取 exe 旁邊的 appsettings.json;缺檔或格式錯誤都退回預設值。</summary>
     public static AppOptions Load()
@@ -158,12 +189,8 @@ public sealed class AppOptions
             var path = Path.Combine(dir, "appsettings.json");
             if (!File.Exists(path)) return new AppOptions();
 
-            return JsonSerializer.Deserialize<AppOptions>(File.ReadAllText(path), new JsonSerializerOptions
-            {
-                PropertyNameCaseInsensitive = true,
-                ReadCommentHandling = JsonCommentHandling.Skip,
-                AllowTrailingCommas = true
-            }) ?? new AppOptions();
+            return JsonSerializer.Deserialize(File.ReadAllText(path), AppOptionsContext.Default.AppOptions)
+                   ?? new AppOptions();
         }
         catch
         {
@@ -171,6 +198,20 @@ public sealed class AppOptions
         }
     }
 }
+
+/// <summary>
+/// appsettings.json 的 System.Text.Json 原始碼產生器內容。
+///
+/// AOT／裁剪過的組件不能用反射式序列化——那條路會在執行期直接丟 NotSupportedException,
+/// 被 <see cref="AppOptions.Load"/> 的 try/catch 吞掉,結果是所有設定靜默失效、全用預設值。
+/// 改走原始碼產生器後,設定才真的讀得到,順帶把反射序列化器整包從輸出裁掉。
+/// </summary>
+[JsonSourceGenerationOptions(
+    PropertyNameCaseInsensitive = true,
+    ReadCommentHandling = JsonCommentHandling.Skip,
+    AllowTrailingCommas = true)]
+[JsonSerializable(typeof(AppOptions))]
+internal partial class AppOptionsContext : JsonSerializerContext;
 
 // ═══════════════════════════════════════════════════════════════════════
 //  工時計算
@@ -364,15 +405,8 @@ internal static partial class TrayIconFactory
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool DestroyIcon(IntPtr hIcon);
 
-    /// <summary>尚未完成的弧,以及超時後被染回的弧。亮紅,在深色與淺色工作列上都撐得住。</summary>
-    private static readonly Color Pending = Color.FromArgb(0xE5, 0x48, 0x4D);
-
-    /// <summary>已完成的弧。</summary>
-    private static readonly Color Done = Color.FromArgb(0x4C, 0x9A, 0xFF);
-
-    private static readonly Color Ink = Color.White;
-    private static readonly Color FillNormal = Color.FromArgb(0x22, 0x2B, 0x33);
-    private static readonly Color FillImminent = Color.FromArgb(0x7A, 0x1B, 0x17);
+    /// <summary>圖示配色,由 <see cref="AppOptions"/> 解析而來。</summary>
+    public readonly record struct Palette(Color Done, Color Pending, Color Ink, Color Fill, Color FillImminent);
 
     /// <summary>系統匣圖示的建議邊長,會跟著 DPI 縮放。</summary>
     public static int PreferredSize(AppOptions options)
@@ -385,7 +419,7 @@ internal static partial class TrayIconFactory
     /// <param name="orbit">秒針位置 0 ~ 1(沿圓周一圈)。null 表示不畫。</param>
     /// <param name="pulse">底色脈動強度 0 ~ 1。</param>
     public static Icon Create(string text, CountdownState state, double progress, double overtime,
-                              double? orbit, double pulse, int size)
+                              double? orbit, double pulse, int size, Palette palette)
     {
         using var bitmap = new Bitmap(size, size, PixelFormat.Format32bppArgb);
         using (var g = Graphics.FromImage(bitmap))
@@ -403,19 +437,19 @@ internal static partial class TrayIconFactory
             // 描邊以這個圓為中心線,一半往外一半往內,所以底色也填到這裡為止。
             var ring = new RectangleF(center - radius, center - radius, radius * 2f, radius * 2f);
 
-            var fill = state is CountdownState.Imminent or CountdownState.Overtime ? FillImminent : FillNormal;
+            var fill = state is CountdownState.Imminent or CountdownState.Overtime ? palette.FillImminent : palette.Fill;
             if (pulse > 0) fill = Brighten(fill, 0.22 * pulse);
 
             using (var brush = new SolidBrush(fill))
                 g.FillEllipse(brush, ring);
 
-            DrawRing(g, ring, stroke, progress, overtime);
+            DrawRing(g, ring, stroke, progress, overtime, palette.Done, palette.Pending);
 
             // 圓在垂直中線處的可用寬度是直徑,再扣掉兩側描邊。
-            DrawFittedText(g, text, size, 2f * radius - stroke * 1.6f);
+            DrawFittedText(g, text, size, 2f * radius - stroke * 1.6f, palette.Ink);
 
             // 秒針畫在文字之後,才不會被文字蓋住。
-            if (orbit.HasValue) DrawOrbitDot(g, center, radius, stroke, orbit.Value);
+            if (orbit.HasValue) DrawOrbitDot(g, center, radius, stroke, orbit.Value, palette.Ink);
         }
 
         return ToIcon(bitmap);
@@ -427,10 +461,11 @@ internal static partial class TrayIconFactory
     /// </summary>
     /// <param name="progress">已完成工時比例 0 ~ 1。</param>
     /// <param name="overtime">超時後被染回紅色的比例 0 ~ 1,同樣由正上方順時針推進。</param>
-    private static void DrawRing(Graphics g, RectangleF ring, float stroke, double progress, double overtime)
+    private static void DrawRing(Graphics g, RectangleF ring, float stroke, double progress, double overtime,
+                                 Color doneColor, Color pendingColor)
     {
-        using var pending = new Pen(Pending, stroke) { StartCap = LineCap.Flat, EndCap = LineCap.Flat };
-        using var done = new Pen(Done, stroke) { StartCap = LineCap.Flat, EndCap = LineCap.Flat };
+        using var pending = new Pen(pendingColor, stroke) { StartCap = LineCap.Flat, EndCap = LineCap.Flat };
+        using var done = new Pen(doneColor, stroke) { StartCap = LineCap.Flat, EndCap = LineCap.Flat };
 
         double filled = Math.Clamp(progress, 0.0, 1.0);
         // 還沒藍過的地方談不上染回。
@@ -455,14 +490,14 @@ internal static partial class TrayIconFactory
     /// 一分鐘一圈等於每秒移動 0.7px,剛好在可察覺的邊緣。
     /// 進度環本身是動不了的——八小時走完同樣的圓周,每秒只有 0.0015px。
     /// </summary>
-    private static void DrawOrbitDot(Graphics g, float center, float radius, float stroke, double t)
+    private static void DrawOrbitDot(Graphics g, float center, float radius, float stroke, double t, Color ink)
     {
         double angle = -Math.PI / 2 + (t - Math.Floor(t)) * 2 * Math.PI;
         float x = center + (float)(radius * Math.Cos(angle));
         float y = center + (float)(radius * Math.Sin(angle));
 
         float r = stroke * 0.62f;
-        using var brush = new SolidBrush(Ink);
+        using var brush = new SolidBrush(ink);
         g.FillEllipse(brush, x - r, y - r, r * 2f, r * 2f);
     }
 
@@ -473,7 +508,7 @@ internal static partial class TrayIconFactory
             (int)(c.B + (255 - c.B) * amount));
 
     /// <summary>由大往小試字級,直到塞得進內切圓的內接方框為止。</summary>
-    private static void DrawFittedText(Graphics g, string text, int size, float budget)
+    private static void DrawFittedText(Graphics g, string text, int size, float budget, Color ink)
     {
         if (string.IsNullOrEmpty(text) || budget <= 0) return;
 
@@ -483,7 +518,7 @@ internal static partial class TrayIconFactory
             LineAlignment = StringAlignment.Center,
             FormatFlags = StringFormatFlags.NoWrap | StringFormatFlags.NoClip
         };
-        using var brush = new SolidBrush(Ink);
+        using var brush = new SolidBrush(ink);
         var box = new RectangleF(0, 0, size, size);
 
         for (float em = size * 0.80f; em >= 4f; em -= 0.5f)
@@ -540,6 +575,7 @@ internal sealed class TrayContext : ApplicationContext
     private const int SmoothInterval = 200;    // 警戒階段,脈動才不會頻閃
 
     private readonly AppOptions _options;
+    private readonly TrayIconFactory.Palette _palette;
     private readonly NotifyIcon _icon;
     private readonly WinFormsTimer _timer;
     private readonly ToolStripMenuItem _startItem;
@@ -553,6 +589,9 @@ internal sealed class TrayContext : ApplicationContext
     public TrayContext(AppOptions options)
     {
         _options = options;
+        _palette = new TrayIconFactory.Palette(
+            options.DoneColor, options.PendingColor, options.TextColor,
+            options.FillColor, options.FillImminentColor);
 
         var start = WorkStartResolver.Resolve(_options);
         _clock = new WorkClock(start.Time, _options) { StartSource = start.Source };
@@ -713,7 +752,7 @@ internal sealed class TrayContext : ApplicationContext
         _currentIcon = TrayIconFactory.Create(
             text, state, (double)progressBucket / ProgressSteps, (double)overtimeBucket / ProgressSteps,
             orbit, pulse,
-            TrayIconFactory.PreferredSize(_options));
+            TrayIconFactory.PreferredSize(_options), _palette);
         _icon.Icon = _currentIcon;
         previous?.Dispose();
     }
