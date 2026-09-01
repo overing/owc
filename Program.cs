@@ -1,11 +1,12 @@
-// OffWorkCountdown — 下班倒數系統匣程式(單檔版・八角形進度邊框)
+// OffWorkCountdown — 下班倒數系統匣程式(單檔版・圓環進度邊框)
 //
 // .NET 10 / WinForms,無視窗。登入後自動啟動,從 Windows 事件記錄檔推算當天開工時間,
-// 在系統匣畫一顆八角形圖示倒數剩餘工時,時間到就自己關掉。
+// 在系統匣畫一顆圓形圖示倒數剩餘工時,工時滿了就改為累計超時工作時間。
 //
 // 圖示設計:
-//   八條邊代表八等分的工時。每完成 1/8 就有一條邊由紅轉藍,由正上方順時針推進。
-//   中間的數字才是精確資訊,邊框只提供「今天過了多少」的餘光感受。
+//   外圈是一整圈進度環。工時走到哪,藍色就從正上方順時針把紅色蓋到哪。
+//   工時滿了是整圈藍,超時之後同樣由正上方順時針染回紅色。
+//   中間的數字才是精確資訊,圓環只提供「今天過了多少」的餘光感受。
 //
 // 需要的 csproj 設定:
 //   <OutputType>WinExe</OutputType>
@@ -116,9 +117,6 @@ public sealed class AppOptions
     /// <summary>剩餘時間低於幾分鐘時彈出提示泡泡。</summary>
     public int WarnMinutes { get; set; } = 10;
 
-    /// <summary>倒數歸零後,再等幾秒才真的結束程式(讓最後那顆泡泡有時間被看到)。</summary>
-    public int ExitDelaySeconds { get; set; } = 12;
-
     /// <summary>要讀取的事件記錄檔。System 一般使用者即可讀取,Security 需要系統管理員。</summary>
     public string EventLogName { get; set; } = "System";
 
@@ -127,14 +125,8 @@ public sealed class AppOptions
 
     // ---- 圖示外觀 ----
 
-    /// <summary>邊框的邊數。8 = 八角形。工時會被平均切成這麼多份,每完成一份就有一條邊變藍。</summary>
-    public int SegmentCount { get; set; } = 8;
-
-    /// <summary>進行中的那條邊是否依比例部分著色。false 則整點才整條跳色。</summary>
-    public bool SmoothSegment { get; set; } = true;
-
     /// <summary>圖示邊長,0 = 依 DPI 自動決定(100% 為 16px)。
-    /// 八角形分段在 16px 下很難數清楚,想清楚一點可以設 24,代價是 Windows 縮放後字略糊。</summary>
+    /// 16px 的圓周只有 44px 上下,想把進度看得更細可以設 24,代價是 Windows 縮放後字略糊。</summary>
     public int IconSize { get; set; } = 0;
 
     /// <summary>分鐘是否加上 m 字尾。16px 塞不下三個字元(「45m」會整個看不見),
@@ -153,7 +145,6 @@ public sealed class AppOptions
     [JsonIgnore] public TimeSpan LunchEndTime => ParseTime(LunchEnd, new TimeSpan(13, 0, 0));
     [JsonIgnore] public TimeSpan EarliestStartTime => ParseTime(EarliestStart, new TimeSpan(7, 0, 0));
     [JsonIgnore] public TimeSpan WarnThreshold => TimeSpan.FromMinutes(Math.Max(1, WarnMinutes));
-    [JsonIgnore] public int Sides => Math.Clamp(SegmentCount, 3, 12);
 
     private static TimeSpan ParseTime(string value, TimeSpan fallback)
         => TimeSpan.TryParse(value, out var t) ? t : fallback;
@@ -221,12 +212,27 @@ public sealed class WorkClock(DateTime start, AppOptions options)
     /// <summary>距離下班還有多久。</summary>
     public TimeSpan Remaining(DateTime now) => _options.WorkDuration - Worked(now);
 
-    /// <summary>已完成的工時比例,0 ~ 1。邊框進度就是拿這個值去乘邊數。</summary>
+    /// <summary>已完成的工時比例,0 ~ 1。圓環的藍弧就是拿這個值去乘一整圈。</summary>
     public double Progress(DateTime now)
     {
         var total = _options.WorkDuration.TotalSeconds;
         if (total <= 0) return 1.0;
         return Math.Clamp(Worked(now).TotalSeconds / total, 0.0, 1.0);
+    }
+
+    /// <summary>超時時間。工時還沒滿就是零。</summary>
+    public TimeSpan Overtime(DateTime now)
+    {
+        var remaining = Remaining(now);
+        return remaining < TimeSpan.Zero ? -remaining : TimeSpan.Zero;
+    }
+
+    /// <summary>超時佔一份完整工時的比例,0 ~ 1。圓環就是拿這個值把藍弧依序染回紅色。</summary>
+    public double OvertimeProgress(DateTime now)
+    {
+        var total = _options.WorkDuration.TotalSeconds;
+        if (total <= 0) return 1.0;
+        return Math.Clamp(Overtime(now).TotalSeconds / total, 0.0, 1.0);
     }
 
     /// <summary>預計下班時刻(把會經過的午休加回去)。</summary>
@@ -341,13 +347,15 @@ public enum CountdownState
     /// <summary>剩餘不到 1 小時。</summary>
     WrappingUp,
     /// <summary>剩餘不到警戒分鐘數。</summary>
-    Imminent
+    Imminent,
+    /// <summary>工時已滿,正在累計超時。</summary>
+    Overtime
 }
 
 /// <summary>
-/// 把倒數文字畫成八角形圖示,邊框同時是工時進度條。
+/// 把倒數文字畫成圓形圖示,外圈同時是工時進度環。
 ///
-/// 顏色的表達預算全部花在邊框上,所以底色刻意保持中性深灰,只有進入警戒狀態才轉紅——
+/// 顏色的表達預算全部花在圓環上,所以底色刻意保持中性深灰,只有進入警戒狀態才轉紅——
 /// 一顆 16px 的圖示沒辦法同時清楚講兩件事。
 /// </summary>
 internal static partial class TrayIconFactory
@@ -356,18 +364,15 @@ internal static partial class TrayIconFactory
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool DestroyIcon(IntPtr hIcon);
 
-    /// <summary>尚未完成的邊。亮紅,在深色與淺色工作列上都撐得住。</summary>
+    /// <summary>尚未完成的弧,以及超時後被染回的弧。亮紅,在深色與淺色工作列上都撐得住。</summary>
     private static readonly Color Pending = Color.FromArgb(0xE5, 0x48, 0x4D);
 
-    /// <summary>已完成的邊。</summary>
+    /// <summary>已完成的弧。</summary>
     private static readonly Color Done = Color.FromArgb(0x4C, 0x9A, 0xFF);
 
     private static readonly Color Ink = Color.White;
     private static readonly Color FillNormal = Color.FromArgb(0x22, 0x2B, 0x33);
     private static readonly Color FillImminent = Color.FromArgb(0x7A, 0x1B, 0x17);
-
-    /// <summary>每條邊兩端內縮的比例。留缺口比純粹換色更能幫助分辨邊數。</summary>
-    private const float SegmentGap = 0.10f;
 
     /// <summary>系統匣圖示的建議邊長,會跟著 DPI 縮放。</summary>
     public static int PreferredSize(AppOptions options)
@@ -376,13 +381,12 @@ internal static partial class TrayIconFactory
             : Math.Max(16, SystemInformation.SmallIconSize.Width);
 
     /// <param name="progress">已完成工時比例 0 ~ 1。</param>
-    /// <param name="orbit">秒針位置 0 ~ 1(沿周長一圈)。null 表示不畫。</param>
+    /// <param name="overtime">超時比例 0 ~ 1。會把已完成的藍弧由頭依序染回紅色。</param>
+    /// <param name="orbit">秒針位置 0 ~ 1(沿圓周一圈)。null 表示不畫。</param>
     /// <param name="pulse">底色脈動強度 0 ~ 1。</param>
-    public static Icon Create(string text, CountdownState state, double progress,
-                              double? orbit, double pulse, int size, AppOptions options)
+    public static Icon Create(string text, CountdownState state, double progress, double overtime,
+                              double? orbit, double pulse, int size)
     {
-        int sides = options.Sides;
-
         using var bitmap = new Bitmap(size, size, PixelFormat.Format32bppArgb);
         using (var g = Graphics.FromImage(bitmap))
         {
@@ -391,100 +395,75 @@ internal static partial class TrayIconFactory
             g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
             g.Clear(Color.Transparent);
 
-            // 邊框要承載資訊,所以畫得比純裝飾的圓框粗。
+            // 圓環要承載資訊,所以畫得比純裝飾的細框粗。
             float stroke = Math.Max(1.5f, size / 8f);
             float radius = (size - stroke) / 2f;
             float center = size / 2f;
 
-            var vertices = Polygon(center, center, radius, sides);
+            // 描邊以這個圓為中心線,一半往外一半往內,所以底色也填到這裡為止。
+            var ring = new RectangleF(center - radius, center - radius, radius * 2f, radius * 2f);
 
-            var fill = state == CountdownState.Imminent ? FillImminent : FillNormal;
+            var fill = state is CountdownState.Imminent or CountdownState.Overtime ? FillImminent : FillNormal;
             if (pulse > 0) fill = Brighten(fill, 0.22 * pulse);
 
             using (var brush = new SolidBrush(fill))
-                g.FillPolygon(brush, vertices);
+                g.FillEllipse(brush, ring);
 
-            DrawSegments(g, vertices, stroke, progress * sides, options.SmoothSegment);
+            DrawRing(g, ring, stroke, progress, overtime);
 
-            // 正多邊形在垂直中線處的可用寬度是內切圓直徑,再扣掉兩側描邊。
-            float inradius = radius * (float)Math.Cos(Math.PI / sides);
-            DrawFittedText(g, text, size, 2f * inradius - stroke * 1.6f);
+            // 圓在垂直中線處的可用寬度是直徑,再扣掉兩側描邊。
+            DrawFittedText(g, text, size, 2f * radius - stroke * 1.6f);
 
             // 秒針畫在文字之後,才不會被文字蓋住。
-            if (orbit.HasValue) DrawOrbitDot(g, vertices, stroke, orbit.Value);
+            if (orbit.HasValue) DrawOrbitDot(g, center, radius, stroke, orbit.Value);
         }
 
         return ToIcon(bitmap);
     }
 
-    /// <summary>由正上方開始、順時針排列的頂點。第一條邊會是水平的頂邊。</summary>
-    private static PointF[] Polygon(float cx, float cy, float r, int sides)
-    {
-        var points = new PointF[sides];
-        double step = 2 * Math.PI / sides;
-        double start = -Math.PI / 2 - step / 2;   // 讓頂邊置中而不是頂點朝上
-
-        for (int i = 0; i < sides; i++)
-        {
-            double angle = start + step * i;
-            points[i] = new PointF(
-                cx + (float)(r * Math.Cos(angle)),
-                cy + (float)(r * Math.Sin(angle)));
-        }
-        return points;
-    }
-
-    /// <param name="doneUnits">已完成的邊數(可含小數)。</param>
-    private static void DrawSegments(Graphics g, PointF[] vertices, float stroke, double doneUnits, bool smooth)
+    /// <summary>
+    /// 進度環。整圈最多三段:超時染回的紅、還沒被染回的藍、還沒完成的紅,
+    /// 三段首尾相接,一條線繞完整個圓周。
+    /// </summary>
+    /// <param name="progress">已完成工時比例 0 ~ 1。</param>
+    /// <param name="overtime">超時後被染回紅色的比例 0 ~ 1,同樣由正上方順時針推進。</param>
+    private static void DrawRing(Graphics g, RectangleF ring, float stroke, double progress, double overtime)
     {
         using var pending = new Pen(Pending, stroke) { StartCap = LineCap.Flat, EndCap = LineCap.Flat };
         using var done = new Pen(Done, stroke) { StartCap = LineCap.Flat, EndCap = LineCap.Flat };
 
-        for (int i = 0; i < vertices.Length; i++)
-        {
-            PointF a = vertices[i];
-            PointF b = vertices[(i + 1) % vertices.Length];
+        double filled = Math.Clamp(progress, 0.0, 1.0);
+        // 還沒藍過的地方談不上染回。
+        double reverted = Math.Min(Math.Clamp(overtime, 0.0, 1.0), filled);
 
-            // 兩端各內縮一點,邊與邊之間就有缺口。
-            PointF from = Lerp(a, b, SegmentGap);
-            PointF to = Lerp(a, b, 1f - SegmentGap);
+        DrawArc(g, pending, ring, 0.0, reverted);
+        DrawArc(g, done, ring, reverted, filled);
+        DrawArc(g, pending, ring, filled, 1.0);
+    }
 
-            double filled = Math.Clamp(doneUnits - i, 0.0, 1.0);
-            if (!smooth) filled = filled >= 1.0 ? 1.0 : 0.0;
-
-            if (filled <= 0.0)
-            {
-                g.DrawLine(pending, from, to);
-            }
-            else if (filled >= 1.0)
-            {
-                g.DrawLine(done, from, to);
-            }
-            else
-            {
-                PointF split = Lerp(from, to, (float)filled);
-                g.DrawLine(done, from, split);
-                g.DrawLine(pending, split, to);
-            }
-        }
+    /// <summary>畫圓周上 [a, b] 這一段,0 是正上方、順時針前進。太短就整段跳過。</summary>
+    private static void DrawArc(Graphics g, Pen pen, RectangleF ring, double a, double b)
+    {
+        if (b - a <= 1e-4) return;
+        g.DrawArc(pen, ring, (float)(-90.0 + a * 360.0), (float)((b - a) * 360.0));
     }
 
     /// <summary>
-    /// 沿著多邊形周長跑的白點,一分鐘一圈。
+    /// 沿著圓周跑的白點,一分鐘一圈。
     ///
-    /// 這是整顆圖示唯一「每秒都看得到變化」的元素:16px 的周長約 49px,
-    /// 一分鐘一圈等於每秒移動 0.8px,剛好在可察覺的邊緣。
-    /// 進度環本身是動不了的——八小時走完同樣的周長,每秒只有 0.0017px。
+    /// 這是整顆圖示唯一「每秒都看得到變化」的元素:16px 的圓周約 44px,
+    /// 一分鐘一圈等於每秒移動 0.7px,剛好在可察覺的邊緣。
+    /// 進度環本身是動不了的——八小時走完同樣的圓周,每秒只有 0.0015px。
     /// </summary>
-    private static void DrawOrbitDot(Graphics g, PointF[] vertices, float stroke, double t)
+    private static void DrawOrbitDot(Graphics g, float center, float radius, float stroke, double t)
     {
-        double u = (t - Math.Floor(t)) * vertices.Length;
-        int i = Math.Min((int)u, vertices.Length - 1);
-        PointF p = Lerp(vertices[i], vertices[(i + 1) % vertices.Length], (float)(u - i));
+        double angle = -Math.PI / 2 + (t - Math.Floor(t)) * 2 * Math.PI;
+        float x = center + (float)(radius * Math.Cos(angle));
+        float y = center + (float)(radius * Math.Sin(angle));
 
         float r = stroke * 0.62f;
         using var brush = new SolidBrush(Ink);
-        g.FillEllipse(brush, p.X - r, p.Y - r, r * 2f, r * 2f);
+        g.FillEllipse(brush, x - r, y - r, r * 2f, r * 2f);
     }
 
     private static Color Brighten(Color c, double amount)
@@ -492,9 +471,6 @@ internal static partial class TrayIconFactory
             (int)(c.R + (255 - c.R) * amount),
             (int)(c.G + (255 - c.G) * amount),
             (int)(c.B + (255 - c.B) * amount));
-
-    private static PointF Lerp(PointF a, PointF b, float t)
-        => new(a.X + (b.X - a.X) * t, a.Y + (b.Y - a.Y) * t);
 
     /// <summary>由大往小試字級,直到塞得進內切圓的內接方框為止。</summary>
     private static void DrawFittedText(Graphics g, string text, int size, float budget)
@@ -553,7 +529,7 @@ internal static partial class TrayIconFactory
 /// </summary>
 internal sealed class TrayContext : ApplicationContext
 {
-    /// <summary>進度量化的階數。每條邊切 8 段,避免每次 tick 都在重畫圖示。</summary>
+    /// <summary>進度量化的階數。整圈切 64 階(16px 下約每 0.7px 一階),避免每次 tick 都在重畫圖示。</summary>
     private const int ProgressSteps = 64;
 
     // 更新頻率是分級的。整天以 1Hz 重畫圖示等於連續八小時阻止 CPU 進入深層省電狀態,
@@ -572,7 +548,7 @@ internal sealed class TrayContext : ApplicationContext
     private Icon? _currentIcon;
     private string _lastRendered = string.Empty;
     private bool _warned;
-    private bool _finishing;
+    private bool _overtimeAnnounced;
 
     public TrayContext(AppOptions options)
     {
@@ -614,26 +590,22 @@ internal sealed class TrayContext : ApplicationContext
 
     private void Refresh()
     {
-        if (_finishing) return;
-
         var now = DateTime.Now;
 
+        var remaining = _clock.Remaining(now);
+        var overtime = _clock.Overtime(now);
+
         // 跨日(例如電腦整晚沒關、程式跑過午夜)就重新推算一次。
-        if (now.Date != _clock.Start.Date)
+        // 超時中是例外:那是還沒下班的同一班,不是新的一天,重算會把累計的超時抹掉。
+        // 代價是超時過午夜後就不會自己換日了,要換得從選單「重新偵測開工時間」。
+        if (now.Date != _clock.Start.Date && remaining > TimeSpan.Zero)
         {
             Redetect();
             return;
         }
 
-        var remaining = _clock.Remaining(now);
-
-        if (remaining <= TimeSpan.Zero)
-        {
-            Finish();
-            return;
-        }
-
-        var state = remaining <= _options.WarnThreshold ? CountdownState.Imminent
+        var state = remaining <= TimeSpan.Zero ? CountdownState.Overtime
+                  : remaining <= _options.WarnThreshold ? CountdownState.Imminent
                   : remaining < TimeSpan.FromHours(1) ? CountdownState.WrappingUp
                   : CountdownState.Plenty;
 
@@ -650,10 +622,19 @@ internal sealed class TrayContext : ApplicationContext
             : 0.0;
 
         SetInterval(state, remaining, animate);
-        RenderIcon(FormatBadge(remaining), state, _clock.Progress(now), orbit, pulse);
-        UpdateTooltip(remaining, now);
+        RenderIcon(state == CountdownState.Overtime ? FormatOvertimeBadge(overtime) : FormatBadge(remaining),
+                   state, _clock.Progress(now), _clock.OvertimeProgress(now), orbit, pulse);
+        UpdateTooltip(remaining, overtime);
 
-        if (state == CountdownState.Imminent && !_warned)
+        if (state == CountdownState.Overtime)
+        {
+            if (!_overtimeAnnounced)
+            {
+                _overtimeAnnounced = true;
+                _icon.ShowBalloonTip(15_000, "下班倒數", "工時已滿,開始計算超時工作", ToolTipIcon.Info);
+            }
+        }
+        else if (state == CountdownState.Imminent && !_warned)
         {
             _warned = true;
             _icon.ShowBalloonTip(15_000, "下班倒數", "準備下班嘍", ToolTipIcon.Info);
@@ -676,6 +657,19 @@ internal sealed class TrayContext : ApplicationContext
         return _options.ShowMinuteSuffix ? $"{minutes}m" : minutes.ToString();
     }
 
+    /// <summary>
+    /// 超時的圖示文字。與倒數相反,採無條件捨去——講的是「已經超過多久」。
+    /// 字面和倒數長得一樣,靠圓環染回紅色與底色轉紅來分辨。
+    /// </summary>
+    private string FormatOvertimeBadge(TimeSpan overtime)
+    {
+        if (overtime >= TimeSpan.FromHours(1))
+            return $"{(int)overtime.TotalHours}H";
+
+        int minutes = Math.Clamp((int)overtime.TotalMinutes, 0, 59);
+        return _options.ShowMinuteSuffix ? $"{minutes}m" : minutes.ToString();
+    }
+
     /// <summary>目前狀態該不該播動畫。</summary>
     private bool ShouldAnimate(CountdownState state)
     {
@@ -694,42 +688,45 @@ internal sealed class TrayContext : ApplicationContext
         int desired =
             animate && state == CountdownState.Imminent ? SmoothInterval
             : animate ? TickInterval
+            // 超時的 remaining 是負的,一樣落在這裡:每 5 秒更新,足夠跟上分鐘數與染回的進度。
             : remaining < TimeSpan.FromHours(1) ? NearInterval
             : IdleInterval;
 
         if (_timer.Interval != desired) _timer.Interval = desired;
     }
 
-    private void RenderIcon(string text, CountdownState state, double progress,
+    private void RenderIcon(string text, CountdownState state, double progress, double overtime,
                             double? orbit = null, double pulse = 0.0)
     {
         // 全部量化後再比對。沒有這一層,每次 tick 都會因為浮點微差而重新產生 GDI 物件;
         // 有了它,靜止狀態下一整個小時可能只重畫幾次。
         int progressBucket = (int)Math.Round(progress * ProgressSteps);
+        int overtimeBucket = (int)Math.Round(overtime * ProgressSteps);
         int orbitBucket = orbit.HasValue ? (int)Math.Round(orbit.Value * 120) % 120 : -1;
         int pulseBucket = (int)Math.Round(pulse * 8);
 
-        var key = $"{text}|{state}|{progressBucket}|{orbitBucket}|{pulseBucket}";
+        var key = $"{text}|{state}|{progressBucket}|{overtimeBucket}|{orbitBucket}|{pulseBucket}";
         if (key == _lastRendered) return;
         _lastRendered = key;
 
         var previous = _currentIcon;
         _currentIcon = TrayIconFactory.Create(
-            text, state, (double)progressBucket / ProgressSteps,
+            text, state, (double)progressBucket / ProgressSteps, (double)overtimeBucket / ProgressSteps,
             orbit, pulse,
-            TrayIconFactory.PreferredSize(_options), _options);
+            TrayIconFactory.PreferredSize(_options));
         _icon.Icon = _currentIcon;
         previous?.Dispose();
     }
 
-    private void UpdateTooltip(TimeSpan remaining, DateTime now)
+    private void UpdateTooltip(TimeSpan remaining, TimeSpan overtime)
     {
-        int sides = _options.Sides;
-        int litEdges = (int)(_clock.Progress(now) * sides);
+        var head = remaining > TimeSpan.Zero
+            ? $"剩 {(int)remaining.TotalHours} 時 {remaining.Minutes} 分"
+            : $"超時工作 {(int)overtime.TotalHours} 時 {overtime.Minutes} 分";
 
         // NotifyIcon.Text 上限 63 字元,超過會丟例外。
-        var tip = $"剩 {(int)remaining.TotalHours} 時 {remaining.Minutes} 分・{litEdges}/{sides} 邊"
-                + $"\r\n開工 {_clock.Start:HH:mm}・預計 {_clock.ExpectedEnd:HH:mm} 下班";
+        var tip = head
+                + $"\r\n開工 {_clock.Start:HH:mm}・下班 {_clock.ExpectedEnd:HH:mm}";
         _icon.Text = tip.Length > 63 ? tip[..63] : tip;
 
         _startItem.Text = $"開工 {_clock.Start:HH:mm}({_clock.StartSource})";
@@ -741,6 +738,7 @@ internal sealed class TrayContext : ApplicationContext
     {
         _clock.Shift(delta);
         _warned = false;
+        _overtimeAnnounced = false;
         _lastRendered = string.Empty;
         Refresh();
     }
@@ -750,7 +748,7 @@ internal sealed class TrayContext : ApplicationContext
         var start = WorkStartResolver.Resolve(_options);
         _clock = new WorkClock(start.Time, _options) { StartSource = start.Source };
         _warned = false;
-        _finishing = false;
+        _overtimeAnnounced = false;
         _lastRendered = string.Empty;
         Refresh();
     }
@@ -761,15 +759,18 @@ internal sealed class TrayContext : ApplicationContext
 
         var now = DateTime.Now;
         var remaining = _clock.Remaining(now);
+        var overtime = _clock.Overtime(now);
         var worked = _clock.Worked(now);
         var lunch = _clock.LunchTaken(now);
-        int sides = _options.Sides;
+
+        var tail = remaining > TimeSpan.Zero
+            ? $"還剩 {(int)remaining.TotalHours} 小時 {remaining.Minutes} 分,預計 {_clock.ExpectedEnd:HH:mm} 下班"
+            : $"超時工作 {(int)overtime.TotalHours} 小時 {overtime.Minutes} 分,應於 {_clock.ExpectedEnd:HH:mm} 下班";
 
         _icon.ShowBalloonTip(8_000, "下班倒數",
             $"開工 {_clock.Start:HH:mm}({_clock.StartSource})\n" +
             $"已工作 {(int)worked.TotalHours} 小時 {worked.Minutes} 分,已扣午休 {(int)lunch.TotalMinutes} 分\n" +
-            $"邊框進度 {(int)(_clock.Progress(now) * sides)}/{sides}\n" +
-            $"還剩 {(int)remaining.TotalHours} 小時 {remaining.Minutes} 分,預計 {_clock.ExpectedEnd:HH:mm} 下班",
+            tail,
             ToolTipIcon.None);
     }
 
@@ -784,29 +785,7 @@ internal sealed class TrayContext : ApplicationContext
     private void OnTimeChanged(object? sender, EventArgs e) => Refresh();
 
     // ---------- 結束 ----------
-
-    private void Finish()
-    {
-        _finishing = true;
-        _timer.Stop();
-
-        // 收工時八條邊全藍,並停掉動畫。
-        RenderIcon("OK", CountdownState.Imminent, 1.0);
-        _icon.Text = "工時已滿,收工";
-        _icon.ShowBalloonTip(10_000, "下班倒數", "工時已滿,收工囉", ToolTipIcon.Info);
-
-        var exitTimer = new WinFormsTimer
-        {
-            Interval = Math.Max(1, _options.ExitDelaySeconds) * 1000
-        };
-        exitTimer.Tick += (_, _) =>
-        {
-            exitTimer.Stop();
-            exitTimer.Dispose();
-            ExitThread();
-        };
-        exitTimer.Start();
-    }
+    // 工時滿了不再自動結束,只有選單的「結束」會走到這裡。
 
     protected override void ExitThreadCore()
     {
