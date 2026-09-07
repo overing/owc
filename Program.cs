@@ -90,6 +90,18 @@ public enum AnimationMode
     Always
 }
 
+/// <summary>圖示上「小時」的取整方式。分鐘不受影響——那邊永遠無條件進位,
+/// 為的是只要還有時間就不會顯示 0。</summary>
+public enum HourRoundingMode
+{
+    /// <summary>四捨五入。剩 7 小時 59 分顯示 "8H",最大誤差 30 分。</summary>
+    Nearest,
+
+    /// <summary>無條件捨去。字面上是「至少還有 N 小時」,
+    /// 代價是最多少報 59 分,而且 8 小時工時永遠看不到 "8H"。</summary>
+    Down
+}
+
 /// <summary>開工時間的判定策略。</summary>
 public enum StartStrategy
 {
@@ -132,6 +144,12 @@ public sealed class AppOptions
     /// <summary>分鐘是否加上 m 字尾。16px 塞不下三個字元(「45m」會整個看不見),
     /// 所以預設關閉:有字母就是小時,純數字就是分鐘。IconSize 設到 24 以上再開啟。</summary>
     public bool ShowMinuteSuffix { get; set; } = false;
+
+    /// <summary>圖示上小時的取整方式。預設四捨五入:捨去的話剩 7 小時 59 分會寫成 "7H",
+    /// 比實際少報將近一小時。想要舊行為設 Down。
+    /// 超時的數字不吃這個設定——那是已經發生的時間,一律捨去。</summary>
+    [JsonConverter(typeof(JsonStringEnumConverter<HourRoundingMode>))]
+    public HourRoundingMode HourRounding { get; set; } = HourRoundingMode.Nearest;
 
     /// <summary>動畫模式。Endgame(預設)只在最後警戒階段動起來,平時完全靜止。</summary>
     [JsonConverter(typeof(JsonStringEnumConverter<AnimationMode>))]
@@ -556,6 +574,62 @@ internal static partial class TrayIconFactory
 }
 
 // ═══════════════════════════════════════════════════════════════════════
+//  圖示文字
+// ═══════════════════════════════════════════════════════════════════════
+
+/// <summary>
+/// 圖示中央那兩個字元。
+///
+/// 獨立成不碰 WinForms 的靜態類別,是為了讓邊界(1:00、1:29:59、7:59)在沒有
+/// WinForms 的環境也驗得起來——CLR 載入型別時會連帶解析欄位型別,掛在
+/// <see cref="TrayContext"/> 上就得把整個 WinForms 拖進來才呼叫得到。
+///
+/// 輸出一律控制在兩個字元內:16px 的圖示放不下三個字元,硬塞會縮到完全看不見。
+/// 有字母代表小時,純數字代表分鐘。
+/// </summary>
+internal static class Badge
+{
+    /// <summary>
+    /// 倒數的文字。超過 1 小時是 "8H",不到 1 小時是 "45"(或 "45m",看設定)。
+    ///
+    /// 小時的取整看 <paramref name="rounding"/>;分鐘一律無條件進位並夾在 1~59,
+    /// 銜接時才不會出現 "60m",也不會在還有時間時顯示 0。
+    ///
+    /// (WorkHours 設到 9.5 以上時四捨五入會湊出三個字元的 "10H",那是設定端的取捨。)
+    /// </summary>
+    public static string Remaining(TimeSpan remaining, bool showMinuteSuffix, HourRoundingMode rounding)
+    {
+        if (remaining >= TimeSpan.FromHours(1))
+        {
+            // AwayFromZero 不能省:Math.Round 預設是銀行家捨入,6.5 小時會變成 "6H",
+            // 而每個整點半正好都是這裡的邊界。
+            int hours = rounding == HourRoundingMode.Nearest
+                ? (int)Math.Round(remaining.TotalHours, MidpointRounding.AwayFromZero)
+                : (int)remaining.TotalHours;
+            return $"{hours}H";
+        }
+
+        int minutes = Math.Clamp((int)Math.Ceiling(remaining.TotalMinutes), 1, 59);
+        return showMinuteSuffix ? $"{minutes}m" : minutes.ToString();
+    }
+
+    /// <summary>
+    /// 超時的文字。無論 HourRounding 設什麼都是無條件捨去——講的是「已經超過多久」,
+    /// 進位或四捨五入會變成虛報加班。這個不對稱是刻意的。
+    ///
+    /// 字面和倒數長得一樣,靠圓環染回紅色與底色轉紅來分辨。
+    /// </summary>
+    public static string Overtime(TimeSpan overtime, bool showMinuteSuffix)
+    {
+        if (overtime >= TimeSpan.FromHours(1))
+            return $"{(int)overtime.TotalHours}H";
+
+        int minutes = Math.Clamp((int)overtime.TotalMinutes, 0, 59);
+        return showMinuteSuffix ? $"{minutes}m" : minutes.ToString();
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 //  系統匣主控制
 // ═══════════════════════════════════════════════════════════════════════
 
@@ -661,7 +735,9 @@ internal sealed class TrayContext : ApplicationContext
             : 0.0;
 
         SetInterval(state, remaining, animate);
-        RenderIcon(state == CountdownState.Overtime ? FormatOvertimeBadge(overtime) : FormatBadge(remaining),
+        RenderIcon(state == CountdownState.Overtime
+                       ? Badge.Overtime(overtime, _options.ShowMinuteSuffix)
+                       : Badge.Remaining(remaining, _options.ShowMinuteSuffix, _options.HourRounding),
                    state, _clock.Progress(now), _clock.OvertimeProgress(now), orbit, pulse);
         UpdateTooltip(remaining, overtime);
 
@@ -678,35 +754,6 @@ internal sealed class TrayContext : ApplicationContext
             _warned = true;
             _icon.ShowBalloonTip(15_000, "下班倒數", "準備下班嘍", ToolTipIcon.Info);
         }
-    }
-
-    /// <summary>
-    /// 圖示上的文字。超過 1 小時是 "7H",不到 1 小時是 "45"(或 "45m",看設定)。
-    /// 小時無條件捨去、分鐘無條件進位並上限 59,銜接時才不會出現 "60m"。
-    ///
-    /// 一律控制在兩個字元內:16px 的圖示放不下三個字元,硬塞會縮到完全看不見。
-    /// 有字母代表小時,純數字代表分鐘。
-    /// </summary>
-    private string FormatBadge(TimeSpan remaining)
-    {
-        if (remaining >= TimeSpan.FromHours(1))
-            return $"{(int)remaining.TotalHours}H";
-
-        int minutes = Math.Clamp((int)Math.Ceiling(remaining.TotalMinutes), 1, 59);
-        return _options.ShowMinuteSuffix ? $"{minutes}m" : minutes.ToString();
-    }
-
-    /// <summary>
-    /// 超時的圖示文字。與倒數相反,採無條件捨去——講的是「已經超過多久」。
-    /// 字面和倒數長得一樣,靠圓環染回紅色與底色轉紅來分辨。
-    /// </summary>
-    private string FormatOvertimeBadge(TimeSpan overtime)
-    {
-        if (overtime >= TimeSpan.FromHours(1))
-            return $"{(int)overtime.TotalHours}H";
-
-        int minutes = Math.Clamp((int)overtime.TotalMinutes, 0, 59);
-        return _options.ShowMinuteSuffix ? $"{minutes}m" : minutes.ToString();
     }
 
     /// <summary>目前狀態該不該播動畫。</summary>

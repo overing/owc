@@ -34,6 +34,7 @@
   "WarnMinutes": 10,         // 剩幾分鐘彈提醒
   "Strategy": "FirstEventOfDay", // 或 BootOrWake（不關機的人用這個比較準）
   "Animation": "Endgame",    // Off / Endgame / Always
+  "HourRounding": "Nearest", // 小時取整：Nearest（四捨五入）／ Down（無條件捨去）
 
   // 圓環配色，吃 #RRGGBB 或 #AARRGGBB
   "ColorDone": "#4C9AFF",         // 已完成的藍弧
@@ -45,6 +46,15 @@
 ```
 
 缺檔、打錯字、多逗號、色碼亂填都不會讓它崩——一律安靜退回預設值。
+
+### 圖示上的小時怎麼取整
+
+`HourRounding` 預設 `Nearest`（四捨五入）：剩 7 小時 59 分顯示 `8H`，最大誤差 30 分。
+設成 `Down` 是無條件捨去，字面上是「至少還有 N 小時」，但最多會少報 59 分——
+8 小時工時在捨去模式下永遠看不到 `8H`。
+
+分鐘不受這個設定影響，一律無條件進位（所以只要還有時間就不會顯示 `0`）。
+超時的數字也不受影響，永遠捨去——那講的是「已經超過多久」，進位等於虛報加班。
 
 ## 右鍵選單
 
